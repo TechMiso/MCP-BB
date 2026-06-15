@@ -1,15 +1,11 @@
 {
   "name": "pennylane-mcp-proxy",
   "version": "1.0.0",
-  "description": "Secured MCP proxy for Pennylane",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": "20"
-  },
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": "20" },
   "dependencies": {
+    "@wanadev/pennylane-mcp": "latest",
     "express": "^4.19.2",
     "http-proxy-middleware": "^2.0.6"
   }
