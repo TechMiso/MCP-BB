@@ -47,7 +47,7 @@ function startSupergateway() {
     ['-y', 'supergateway',
      '--port', String(INTERNAL_PORT),
      '--outputTransport', 'streamableHttp',
-     '--stdio', 'npx -y @wanadev/pennylane-mcp'],
+     '--stdio', './node_modules/.bin/pennylane-mcp'],
     { stdio: 'inherit', env: process.env }
   );
 
