@@ -1,99 +1,60 @@
-// server.js — Auto-restart supervisor pour pennylane-mcp
+// server.js — Auth proxy + supergateway
+const express = require('express');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 const { spawn } = require('child_process');
-const http = require('http');
 
-const PORT = process.env.PORT || 3000;
-const BEARER_TOKEN = process.env.PENNYLANE_BEARER_TOKEN;
-const HEALTH_CHECK_INTERVAL = 30 * 1000; // vérif toutes les 30s
-const STARTUP_GRACE        = 20 * 1000; // attente avant 1ère vérif
-const RESTART_DELAY        =  5 * 1000; // pause avant redémarrage
+const PORT = parseInt(process.env.PORT || 3000);
+const INTERNAL_PORT = PORT + 1;
+const MCP_SECRET = process.env.MCP_SECRET; // ton Bearer token
 
-let proc       = null;
-let restarting = false;
+const app = express();
 
-function ts() {
-  return new Date().toISOString();
-}
+// 1. Health check (sans auth)
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// ── Démarre supergateway + pennylane-mcp ──────────────────────────────────────
-function startProcess() {
-  restarting = false;
-  console.log(`[${ts()}] Démarrage supergateway + pennylane-mcp (port ${PORT})...`);
+// 2. Auth middleware
+app.use((req, res, next) => {
+  if (!MCP_SECRET) return next(); // pas de secret configuré = pas d'auth
+  const auth = req.headers['authorization'];
+  if (!auth || auth !== `Bearer ${MCP_SECRET}`) {
+    console.log(`[Auth] ❌ Unauthorized — ${req.ip}`);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+});
 
-  proc = spawn(
+// 3. Proxy vers supergateway interne
+app.use('/', createProxyMiddleware({
+  target: `http://localhost:${INTERNAL_PORT}`,
+  changeOrigin: true,
+  on: {
+    error: (err, req, res) => {
+      console.error('[Proxy] Erreur:', err.message);
+      res.status(503).json({ error: 'MCP server unavailable' });
+    }
+  }
+}));
+
+app.listen(PORT, () => {
+  console.log(`[Auth proxy] ✅ Écoute sur port ${PORT}`);
+});
+
+// 4. Démarrage supergateway sur port INTERNE
+function startSupergateway() {
+  console.log(`[Supergateway] Démarrage sur port interne ${INTERNAL_PORT}...`);
+  const proc = spawn(
     'npx',
     ['-y', 'supergateway',
-     '--port', String(PORT),
+     '--port', String(INTERNAL_PORT),
      '--outputTransport', 'streamableHttp',
      '--stdio', 'npx -y @wanadev/pennylane-mcp'],
     { stdio: 'inherit', env: process.env }
   );
 
-  proc.on('spawn', () => console.log(`[${ts()}] ✓ Processus démarré`));
-  proc.on('error', (err) => console.error(`[${ts()}] Erreur spawn: ${err.message}`));
-  proc.on('exit', (code, signal) => {
-    console.warn(`[${ts()}] Processus terminé (code=${code} signal=${signal}) — redémarrage dans ${RESTART_DELAY / 1000}s`);
-    proc = null;
-    scheduleRestart();
+  proc.on('close', (code) => {
+    console.log(`[Supergateway] ⚠️ Terminé (code ${code}) — redémarrage dans 5s`);
+    setTimeout(startSupergateway, 5000);
   });
 }
 
-// ── Planifie un redémarrage ───────────────────────────────────────────────────
-function scheduleRestart() {
-  if (restarting) return;
-  restarting = true;
-  setTimeout(startProcess, RESTART_DELAY);
-}
-
-// ── Health check interne (tools/list) ────────────────────────────────────────
-function healthCheck() {
-  return new Promise((resolve) => {
-    if (!proc) return resolve(false);
-
-    const body    = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
-    const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) };
-    if (BEARER_TOKEN) headers['Authorization'] = `Bearer ${BEARER_TOKEN}`;
-
-    const req = http.request(
-      { hostname: '127.0.0.1', port: PORT, path: '/mcp', method: 'POST', headers, timeout: 10000 },
-      (res) => {
-        let raw = '';
-        res.on('data', (c) => (raw += c));
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(raw);
-            resolve(!!(json.result?.tools?.length > 0));
-          } catch { resolve(false); }
-        });
-      }
-    );
-    req.on('error',   () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-    req.write(body);
-    req.end();
-  });
-}
-
-// ── Surveillance périodique ───────────────────────────────────────────────────
-async function watchHealth() {
-  await new Promise((r) => setTimeout(r, STARTUP_GRACE)); // laisse le temps de démarrer
-
-  while (true) {
-    await new Promise((r) => setTimeout(r, HEALTH_CHECK_INTERVAL));
-    if (restarting || !proc) continue;
-
-    const ok = await healthCheck();
-    if (ok) {
-      console.log(`[${ts()}] ✓ Health check OK`);
-    } else {
-      console.error(`[${ts()}] ✗ Health check échoué — redémarrage...`);
-      proc?.kill('SIGTERM');
-      proc = null;
-      scheduleRestart();
-      await new Promise((r) => setTimeout(r, RESTART_DELAY + 5000));
-    }
-  }
-}
-
-startProcess();
-watchHealth().catch((err) => console.error(`[${ts()}] Watcher crashé: ${err.message}`));
+startSupergateway();
